@@ -1,0 +1,31 @@
+name: p3_integration
+
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python=3.11
+  - scvi-tools
+  - scanpy
+  - anndata
+  - seaborn
+  - pytorch
+  - numpy
+  - pandas
+  - scipy
+  - scikit-misc
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - leidenalg
+  - notebook
+  - jupyterlab
+  - ipykernel
+  - jupyterlab
+  - pip
+  - pip:
+      - diptest
+      - scib-metrics
+      - tqdm

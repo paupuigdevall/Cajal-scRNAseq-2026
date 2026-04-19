@@ -1,0 +1,3 @@
+SRR30648872	/shared/projects/tp_2616_fnom_183960/Puigdevall_P/midbrainDataset/rawData/SRR30648872
+SRR30648889	/shared/projects/tp_2616_fnom_183960/Puigdevall_P/midbrainDataset/rawData/SRR30648889
+SRR30648890	/shared/projects/tp_2616_fnom_183960/Puigdevall_P/midbrainDataset/rawData/SRR30648890

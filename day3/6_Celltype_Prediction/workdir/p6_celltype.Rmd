@@ -1,0 +1,634 @@
+---
+title: "Practical 6: Cell Type Prediction"
+subtitle: "Single-Cell and Spatial Omics Course 2026"
+author: "Matias M. Falco, Nour Assaf"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    keep_md: yes
+    fig_caption: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 9,
+  fig.height = 6
+)
+```
+
+# Overview
+
+One of the most important — and most subjective — steps in single-cell analysis is **assigning biological identities to clusters**. After quality control, dimensionality reduction, integration, and clustering, we need to answer: *what cell types are we looking at?*
+
+Cell type annotation can be done at two levels:
+
+- **Per-cell**: each individual cell receives a predicted label
+- **Per-cluster**: the majority label within a cluster is used as the cluster identity
+
+Most computational methods work at the per-cell level and are then summarised per cluster for final annotation.
+
+> **Important caveat:** Any cell type prediction method is **just a prediction**. You still need to use your biological knowledge and common sense to judge whether the results make sense. No method is perfect, and predictions should always be validated with known marker genes.
+
+## Learning objectives
+
+By the end of this practical you will be able to:
+
+1. Apply and interpret **four complementary annotation methods**: Seurat Label Transfer, SingleR, Azimuth, and scType
+2. Understand the **conceptual differences** between reference-based (Label Transfer, SingleR, Azimuth) and database-based (scType) approaches
+3. **Compare results** across methods and understand why they may disagree
+4. **Validate** annotations using marker gene enrichment (GSEA)
+5. Assign **final cell type labels** integrating evidence from multiple methods
+
+## Dataset
+
+We use the COVID-19 PBMC dataset from Schulte-Schrepping et al. (2020), which contains **7,134 cells** from **8 donors** (4 COVID-19 patients, 4 healthy controls), already processed through QC, dimensionality reduction, integration (Harmony), and Louvain clustering (resolution 0.5).
+
+---
+
+# Setup
+
+
+```{r}
+.libPaths(c("/shared/projects/tp_2616_fnom_183960/conda/envs/PP_r_env_all/lib/R/library",
+          "/shared/home/tp184323/R/x86_64-conda-linux-gnu-library/4.5"))
+
+```
+
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(pheatmap)
+  library(SingleR)
+  library(celldex)
+  library(BiocParallel)
+  library(scPred)
+  library(Azimuth)
+  library(SeuratData)
+  library(fgsea)
+  library(HGNChelper)
+  library(tidyverse)
+})
+```
+
+---
+
+# 1. Load data
+
+We load the integrated and clustered Seurat object from practical 4. This object has already been through QC (p1), dimensionality reduction (p2), integration (p3), and clustering (p4).
+
+Note that in **Seurat v5**, expression data is stored in separate layers per sample after integration. We call `JoinLayers()` to merge them back into a single matrix before downstream analysis — this is required for `as.SingleCellExperiment()`, `FindAllMarkers()`, and direct matrix access.
+
+```{r load-data}
+getwd()
+data_path <- "/shared/projects/tp_2616_fnom_183960/Puigdevall_P/Cajal-scRNAseq-2026/day2/4_Clustering/data/covid/results/seurat_covid_qc_dr_int_cl.rds"
+tmpdir    <- "/shared/projects/tp_2616_fnom_183960/Puigdevall_P/Cajal-scRNAseq-2026/day3/6_Celltype_Prediction/workdir/tmp_celltype/"
+dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
+
+alldata <- readRDS(data_path)
+```
+
+```{r mergeAndJoin}
+# Seurat v5: merge split layers before any downstream analysis
+alldata <- JoinLayers(alldata)
+
+# Set clustering identity (Louvain resolution 0.5 from practical 4)
+alldata <- SetIdent(alldata, value = "RNA_snn_res.0.5")
+
+cat("Dataset:", ncol(alldata), "cells,", nrow(alldata), "genes\n")
+cat("Clusters:", length(unique(alldata$RNA_snn_res.0.5)), "\n")
+cat("Donors:", length(unique(alldata$orig.ident)), "\n")
+```
+
+```{r umap-overview, fig.width=14, fig.height=5}
+p1 <- DimPlot(alldata, label = TRUE, repel = TRUE) + ggtitle("Clusters (res 0.5)")
+p2 <- DimPlot(alldata, group.by = "type") + ggtitle("COVID vs Control")
+p1 | p2
+```
+
+> **Question 1:** How many clusters do you see? Are any clusters visually enriched in COVID vs. control cells? What might that suggest biologically?
+
+---
+
+# 2. Seurat Label Transfer
+
+## Concept
+
+Label transfer works by **projecting the query dataset onto the PCA space of a reference dataset** and finding "anchors" — pairs of cells (one from each dataset) that are mutual nearest neighbours in the shared low-dimensional space. These anchors are used to transfer labels from the reference to the query.
+
+Key properties:
+
+- Requires a **pre-labelled reference dataset** with good cell type resolution
+- Works best when the reference and query share the same cell types
+- Returns a **confidence score** (0–1) for each prediction: low scores indicate cells that did not match any reference cell type well
+
+```{r reference-inspect}
+# We use the PBMC reference from the scPred package (3,500 cells, 9 cell types)
+reference <- scPred::pbmc_1
+cat("Reference cell types:\n")
+print(table(reference$cell_type))
+```
+
+```{r process-reference}
+# Process reference: normalise → variable features → scale → PCA
+# (same pipeline as our query, so both live in comparable spaces)
+reference <- reference %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+DimPlot(reference, group.by = "cell_type", label = TRUE, repel = TRUE) +
+  ggtitle("Reference PBMC dataset (scPred::pbmc_1)") +
+  NoLegend()
+```
+
+## Transfer labels
+
+The transfer is computationally intensive (~5 min). Pre-computed results are loaded automatically if available.
+
+```{r label-transfer}
+tmpfile_lt <- file.path(tmpdir, "label_transfer_predictions.Rds")
+
+if (file.exists(tmpfile_lt)) {
+  message("Loading pre-computed Label Transfer results...")
+  predictions <- readRDS(tmpfile_lt)
+} else {
+  message("Running Label Transfer (this may take ~5 min)...")
+  transfer.anchors <- FindTransferAnchors(
+    reference = reference,
+    query     = alldata,
+    dims      = 1:30
+  )
+  predictions <- TransferData(
+    anchorset = transfer.anchors,
+    refdata   = reference$cell_type,
+    dims      = 1:30
+  )
+  saveRDS(predictions, tmpfile_lt)
+}
+
+alldata <- AddMetaData(alldata, metadata = predictions)
+```
+
+```{r label-transfer-umap}
+DimPlot(alldata, group.by = "predicted.id", label = TRUE, repel = TRUE) +
+  ggtitle("Label Transfer — predicted cell types") +
+  NoLegend()
+```
+
+## Prediction scores
+
+Each cell receives a `prediction.score.max` value between 0 and 1. This reflects how confidently it matched the winning label. Cells with low scores were not well represented by any cell type in the reference — they could be rare populations, stressed cells, or doublets.
+
+```{r prediction-score}
+FeaturePlot(alldata, features = "prediction.score.max") +
+  scale_color_viridis_c(option = "plasma") +
+  ggtitle("Label Transfer — prediction confidence score")
+```
+
+```{r score-violin}
+alldata@meta.data %>%
+  ggplot(aes(x = predicted.id, y = prediction.score.max, fill = predicted.id)) +
+  geom_violin(scale = "width") +
+  geom_jitter(size = 0.1, alpha = 0.3) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(title = "Prediction score by cell type", x = NULL, y = "Score")
+```
+
+> **Question 2:** Which predicted cell types have the lowest confidence scores? Can you think of a biological reason why those particular cell types might be harder to classify? Hint: look at the reference composition — are all cell types equally well represented?
+
+---
+
+# 3. SingleR
+
+## Concept
+
+SingleR takes a completely different approach from Label Transfer. For each query cell, it computes **Spearman correlations** between the query cell's expression profile and each reference cell type's "pseudo-bulk" profile (the median expression of all cells of that type). The cell is assigned the label with the highest correlation.
+
+Key properties:
+
+- **No shared dimensionality reduction needed** — works purely on gene expression
+- Designed to be **reference-agnostic**: any labelled reference works
+- Performs **iterative pruning** to remove ambiguous predictions: cells whose scores are not significantly higher than other cell types get assigned `NA` (shown as grey in plots)
+- **Delta scores** quantify prediction confidence: the gap between the best and second-best correlation
+
+We test two reference databases to see how robust the annotation is.
+
+```{r singler-prep}
+# Convert to SingleCellExperiment (required by SingleR)
+sce <- as.SingleCellExperiment(alldata)
+cat("SCE created:", ncol(sce), "cells\n")
+```
+
+## DICE reference (immune cells)
+
+The DICE database (Database of Immune Cell Expression) contains sorted, bulk-profiled human immune cell subsets. It is ideal for PBMCs as it covers the main immune populations with high purity.
+
+```{r singler-dice}
+ref.dice    <- celldex::DatabaseImmuneCellExpressionData()
+tmpfile_dice <- file.path(tmpdir, "singler_dice.Rds")
+
+if (file.exists(tmpfile_dice)) {
+  message("Loading pre-computed SingleR (DICE) results...")
+  singler.dice <- readRDS(tmpfile_dice)
+} else {
+  message("Running SingleR with DICE reference (this may take ~15 min)...")
+  singler.dice <- SingleR(
+    test     = sce,
+    ref      = ref.dice,
+    labels   = ref.dice$label.main,
+    BPPARAM  = MulticoreParam(2)
+  )
+  saveRDS(singler.dice, tmpfile_dice)
+}
+
+# pruned.labels: NA for low-confidence predictions
+alldata$singler.dice <- singler.dice$pruned.labels
+cat("Unclassified cells (NA):", sum(is.na(alldata$singler.dice)), "\n")
+```
+
+```{r singler-dice-umap}
+DimPlot(alldata, group.by = "singler.dice", label = TRUE, repel = TRUE) +
+  ggtitle("SingleR — DICE reference") +
+  NoLegend()
+```
+
+## Human Primary Cell Atlas (HPCA)
+
+The HPCA is a broader reference covering many human cell and tissue types — not only immune cells. This makes it less specific for PBMCs but useful for detecting any unexpected non-immune populations.
+
+```{r singler-hpca}
+ref.hpca    <- celldex::HumanPrimaryCellAtlasData()
+tmpfile_hpca <- file.path(tmpdir, "singler_hpca.Rds")
+
+if (file.exists(tmpfile_hpca)) {
+  message("Loading pre-computed SingleR (HPCA) results...")
+  singler.hpca <- readRDS(tmpfile_hpca)
+} else {
+  message("Running SingleR with HPCA reference (this may take ~15 min)...")
+  singler.hpca <- SingleR(
+    test     = sce,
+    ref      = ref.hpca,
+    labels   = ref.hpca$label.main,
+    BPPARAM  = MulticoreParam(2)
+  )
+  saveRDS(singler.hpca, tmpfile_hpca)
+}
+
+alldata$singler.hpca <- singler.hpca$pruned.labels
+```
+
+```{r singler-hpca-umap}
+DimPlot(alldata, group.by = "singler.hpca", label = TRUE, repel = TRUE) +
+  ggtitle("SingleR — HPCA reference") +
+  NoLegend()
+```
+
+## Confidence diagnostics
+
+**Score heatmap**: shows the raw Spearman correlation of each cell to each reference cell type. Ideally, each cell shows a strong signal for one cell type (dark row) and low scores for all others.
+
+**Delta score distribution**: the delta score is the difference between the best and second-best label score. Low deltas indicate that the cell is genuinely ambiguous between two or more cell types. The dashed line is the threshold used for pruning.
+
+```{r singler-scores, fig.height=8}
+plotScoreHeatmap(singler.dice, show.pruned = TRUE)
+```
+
+```{r singler-delta}
+plotDeltaDistribution(singler.dice, ncol = 4)
+```
+
+> **Question 3:** Which cell types show the lowest delta scores (most ambiguous)? Does this ambiguity make biological sense? Why might NK cells and T cells be confused?
+
+---
+
+# 4. Azimuth
+
+## Concept
+
+Azimuth uses a **multimodal reference** — the Seurat PBMC reference built from both RNA and ATAC data from 161,764 cells. This larger and more diverse reference provides **three levels of annotation** with increasing specificity:
+
+- **Level 1 (l1)**: broad cell types (e.g., "CD4 T", "Mono", "B")
+- **Level 2 (l2)**: functionally distinct subtypes (e.g., "CD4 Naive", "CD4 TCM", "CD4 TEM", "CD14 Mono", "CD16 Mono")
+- **Level 3 (l3)**: the finest subdivision (e.g., "CD4 Naive", "CD4 TCM CM", "CD4 TCM EM")
+
+The integration uses **weighted nearest neighbours** in the reference's UMAP, providing more granular and often more accurate predictions than the scPred-based reference used in Label Transfer.
+
+```{r azimuth-install, eval=FALSE}
+# Run once to install the PBMC reference dataset (~500 MB)
+SeuratData::InstallData("pbmcref")
+```
+
+```{r azimuth-run}
+# RunAzimuth integrates the query with the PBMC multimodal reference
+# and adds predicted.celltype.l1, l2, l3 and their scores to metadata
+alldata <- RunAzimuth(alldata, reference = "pbmcref")
+```
+
+```{r azimuth-umap-l1l2, fig.width=14, fig.height=5}
+p_az1 <- DimPlot(alldata, group.by = "predicted.celltype.l1",
+                 label = TRUE, repel = TRUE, label.size = 3) +
+         NoLegend() + ggtitle("Azimuth — level 1 (broad)")
+p_az2 <- DimPlot(alldata, group.by = "predicted.celltype.l2",
+                 label = TRUE, repel = TRUE, label.size = 3) +
+         NoLegend() + ggtitle("Azimuth — level 2 (fine)")
+p_az1 | p_az2
+```
+
+```{r azimuth-score}
+FeaturePlot(alldata, features = "predicted.celltype.l2.score") +
+  scale_color_viridis_c(option = "plasma") +
+  ggtitle("Azimuth — prediction score (level 2)")
+```
+
+> **Question 4:** Compare the l1 and l2 Azimuth maps. Which cell types at l1 get split into multiple subtypes at l2? Does this finer resolution reveal any interesting biology, given that this is a COVID-19 dataset?
+
+---
+
+# 5. scType — database-driven annotation
+
+## Concept
+
+scType takes a different strategy: rather than using a reference dataset of cells, it uses **curated gene sets** from the CellMarker database — lists of marker genes known to define each cell type. For each cluster, it calculates an enrichment score based on how many marker genes are highly expressed, and assigns the cell type with the highest score.
+
+This approach:
+
+- Does **not require a reference dataset** — only gene lists
+- Works at the **cluster level** (not per cell)
+- Is easy to **customise**: you can add your own gene sets
+- Applies a confidence threshold: clusters where the top score is too low relative to cluster size are labelled "Unknown"
+
+```{r sctype-source}
+# scType functions — use local copies (Noppe has restricted internet access)
+sctype_dir <- "/shared/projects/tp_2616_fnom_183960/Puigdevall_P/Cajal-scRNAseq-2026/day3/6_Celltype_Prediction/data/results/sctype/"
+source(file.path(sctype_dir, "gene_sets_prepare.R"))
+source(file.path(sctype_dir, "sctype_score_.R"))
+```
+
+```{r sctype-genesets}
+# Load CellMarker gene sets, filtered to immune system cell types
+#sctype_dir  <- "~/sc-spatial-omics-2026/day-02/practical_6/data/results/sctype"
+gs_list <- gene_sets_prepare(
+  path_to_db_file = file.path(sctype_dir, "ScTypeDB_full.xlsx"),
+  cell_type       = "Immune system"
+)
+
+# How many cell types are in the database?
+cat("Cell types in database:", length(gs_list$gs_positive), "\n")
+cat("Example cell types:\n")
+cat(head(names(gs_list$gs_positive), 10), sep = "\n")
+```
+
+```{r sctype-score}
+# Score each cell using the scaled expression matrix
+es.max <- sctype_score(
+  scRNAseqData = alldata[["RNA"]]$scale.data,
+  scaled       = TRUE,
+  gs           = gs_list$gs_positive,
+  gs2          = gs_list$gs_negative  # negative markers penalise mis-assignment
+)
+
+# Summarise scores per cluster: take the top-scoring cell type
+cl_results <- do.call("rbind", lapply(unique(alldata$RNA_snn_res.0.5), function(cl) {
+  es.max.cl <- sort(rowSums(es.max[, alldata$RNA_snn_res.0.5 == cl]), decreasing = TRUE)
+  n_cells   <- sum(alldata$RNA_snn_res.0.5 == cl)
+  data.frame(
+    cluster  = cl,
+    type     = names(es.max.cl)[1],
+    scores   = es.max.cl[1],
+    ncells   = n_cells,
+    # Confidence threshold: score must exceed sqrt(n_cells)
+    low_conf = es.max.cl[1] < sqrt(n_cells)
+  )
+}))
+
+# Low-confidence clusters are labelled "Unknown"
+cl_results$type[cl_results$low_conf] <- "Unknown"
+cl_results <- cl_results[order(as.numeric(as.character(cl_results$cluster))), ]
+
+print(cl_results[, c("cluster", "type", "scores", "ncells", "low_conf")])
+```
+
+```{r sctype-umap}
+sctype_labels  <- setNames(cl_results$type, cl_results$cluster)
+alldata$sctype <- unname(sctype_labels[as.character(alldata$RNA_snn_res.0.5)])
+
+DimPlot(alldata, group.by = "sctype", label = TRUE, repel = TRUE) +
+  ggtitle("scType — cluster-level annotation") +
+  NoLegend()
+```
+
+> **Question 5:** Are any clusters labelled "Unknown"? Looking at the score table, is the winning cell type clearly dominant, or is the margin narrow? What would you do to improve the annotation for those clusters?
+
+---
+
+# 6. Compare methods
+
+No single method is perfect. Comparing multiple methods helps to:
+
+- Build **confidence** where methods agree
+- Identify **discrepancies** that warrant manual investigation
+- Understand the **limitations** of each approach
+
+## Summary table
+
+```{r compare-table}
+comparison <- alldata@meta.data %>%
+  group_by(RNA_snn_res.0.5) %>%
+  summarise(
+    n_cells        = n(),
+    label_transfer = names(sort(table(predicted.id),          decreasing = TRUE))[1],
+    singler_dice   = names(sort(table(singler.dice),          decreasing = TRUE))[1],
+    singler_hpca   = names(sort(table(singler.hpca),          decreasing = TRUE))[1],
+    azimuth_l1     = names(sort(table(predicted.celltype.l1), decreasing = TRUE))[1],
+    azimuth_l2     = names(sort(table(predicted.celltype.l2), decreasing = TRUE))[1],
+    sctype         = names(sort(table(sctype),                decreasing = TRUE))[1]
+  )
+
+print(comparison)
+```
+
+## Cross-tabulation heatmap
+
+The heatmap shows how many cells each pair of methods agree on. A diagonal pattern means high agreement; off-diagonal entries indicate where methods disagree.
+
+```{r crosstab, fig.height=7}
+ct <- table(
+  LabelTransfer = alldata$predicted.id,
+  SingleR_DICE  = alldata$singler.dice
+)
+
+pheatmap(
+  log1p(ct),
+  color        = colorRampPalette(c("white", "#2166ac"))(50),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  main         = "Label Transfer vs SingleR (DICE) — log1p(cell counts)"
+)
+```
+
+## UMAP panel — all methods
+
+```{r compare-umap, fig.width=14, fig.height=14}
+p1 <- DimPlot(alldata, group.by = "predicted.id",          label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("Label Transfer")
+p2 <- DimPlot(alldata, group.by = "singler.dice",          label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("SingleR — DICE")
+p3 <- DimPlot(alldata, group.by = "singler.hpca",          label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("SingleR — HPCA")
+p4 <- DimPlot(alldata, group.by = "predicted.celltype.l1", label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("Azimuth l1")
+p5 <- DimPlot(alldata, group.by = "predicted.celltype.l2", label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("Azimuth l2")
+p6 <- DimPlot(alldata, group.by = "sctype",                label = TRUE, repel = TRUE, label.size = 3) + NoLegend() + ggtitle("scType")
+
+(p1 | p2) / (p3 | p4) / (p5 | p6)
+```
+
+> **Question 6:** Where do all methods agree, and where do they disagree? Which clusters show the most discrepancy? For the discrepant clusters, which method would you trust most and why?
+
+---
+
+# 7. Validate with marker gene enrichment
+
+Even after running multiple prediction methods, it is good practice to **independently validate** your annotations using known biology. We do this by:
+
+1. Computing cluster marker genes (genes most specific to each cluster)
+2. Running GSEA against curated cell type gene sets from CellMarker
+3. Checking whether the top-enriched cell type matches our predictions
+
+If the GSEA result agrees with the automated predictions, we can be more confident. If it disagrees, we should investigate further.
+
+## Cluster marker genes
+
+```{r cluster-markers}
+markers <- FindAllMarkers(
+  alldata,
+  only.pos        = TRUE,
+  logfc.threshold = 0.25,
+  min.pct         = 0.1,
+  test.use        = "wilcox"
+)
+
+# Top 3 markers per cluster
+markers %>%
+  group_by(cluster) %>%
+  dplyr::slice_max(avg_log2FC, n = 3) %>%
+  dplyr::select(cluster, gene, avg_log2FC, pct.1, pct.2, p_val_adj)
+```
+
+## GSEA against CellMarker
+
+```{r gsea-cellmarker}
+# CellMarker database — use local copy (Noppe has restricted internet access)
+cm_local   <- file.path(sctype_dir, "Cell_marker_Human.xlsx")
+
+cm_data <- tryCatch(
+  readxl::read_excel(cm_local),
+  error = function(e) {
+    message("CellMarker local file not found: ", cm_local)
+    NULL
+  }
+)
+
+if (!is.null(cm_data)) {
+  immune_tissues <- c("Blood", "Venous blood", "Peripheral blood",
+                      "Serum", "Plasma", "Bone marrow", "Lymph node", "Spleen")
+
+  gene_sets <- cm_data %>%
+    filter(species == "Human", tissue_type %in% immune_tissues) %>%
+    group_by(cell_name) %>%
+    summarise(genes = list(unique(Symbol)), .groups = "drop") %>%
+    filter(lengths(genes) >= 5) %>%
+    deframe()
+
+  cat("Gene sets tested:", length(gene_sets), "\n")
+
+  gsea_results <- lapply(sort(unique(markers$cluster)), function(cl) {
+    cl_markers <- markers %>%
+      filter(cluster == cl) %>%
+      arrange(desc(avg_log2FC))
+    gene_rank <- setNames(cl_markers$avg_log2FC, cl_markers$gene)
+
+    fgsea(pathways = gene_sets, stats = gene_rank, minSize = 5, maxSize = 500) %>%
+      filter(padj < 0.05) %>%
+      arrange(desc(NES)) %>%
+      head(3) %>%
+      mutate(cluster = cl)
+  })
+
+  gsea_top <- bind_rows(gsea_results)
+  print(gsea_top %>% select(cluster, pathway, NES, padj))
+} else {
+  message("Skipping GSEA — CellMarker not reachable.")
+}
+```
+
+> **Question 7:** Does the top GSEA-enriched cell type for each cluster match the predictions from your automated methods? Are there any clusters where GSEA suggests a different identity? What would you do next for those?
+
+---
+
+# 8. Assign final labels
+
+After comparing all methods and validating with marker genes, we assign final labels. This is **always a manual step** — the automated methods inform our decision, but the final call requires biological judgement.
+
+A practical approach:
+
+1. Start from the method you trust most for this tissue/dataset (here: Azimuth l2 for PBMCs)
+2. For clusters where methods agree → use the consensus label
+3. For clusters where methods disagree → check the top marker genes manually
+4. For "Unknown" clusters → increase clustering resolution to split, or mark as "Unresolved"
+
+```{r final-labels}
+# Example labels — adjust these based on YOUR comparison above!
+# Based on Label Transfer + SingleR DICE/HPCA + marker gene validation.
+cluster_labels <- c(
+  "0" = "CD14 Monocytes",   # LYZ, S100A8, S100A9 — all methods agree
+  "1" = "NK cells",          # NKG7, CTSW, CST7 — all methods agree
+  "2" = "CD8 T cells",       # CD3G, CD3D, TRAC — LT says CD8 T; DICE says NK (check CD8A)
+  "3" = "B cells",           # IGHD, IGHM, MS4A1 — all methods agree (naïve B cells)
+  "4" = "CD4 T cells",       # IL7R, LTB — all methods agree
+  "5" = "B cells",           # CD79A, MS4A1 — second B cell cluster (likely memory)
+  "6" = "CD16 Monocytes",    # FCGR3A, LST1, AIF1 — all methods agree (non-classical)
+  "7" = "CD4 T cells",       # IL7R, CCR7, PIK3IP1 — naïve/central memory subset
+  "8" = "Platelets",         # PF4, PPBP, NRGN — platelet markers; automated tools called
+                             #   this "Monocytes" because no platelet class in references!
+  "9" = "Unresolved"         # Small cluster (95 cells); LT=CD4 T, DICE/HPCA=NK — ambiguous
+)
+
+alldata$celltype_final <- unname(cluster_labels[as.character(alldata$RNA_snn_res.0.5)])
+
+DimPlot(alldata, group.by = "celltype_final", label = TRUE, repel = TRUE) +
+  ggtitle("Final cell type annotations") +
+  NoLegend()
+```
+
+```{r final-split, fig.width=13, fig.height=5}
+DimPlot(alldata, group.by = "celltype_final", split.by = "type",
+        label = TRUE, repel = TRUE, label.size = 3) +
+  NoLegend() +
+  ggtitle("Final annotations — COVID vs Control")
+```
+
+> **Question 8:** Are there differences in the composition of cell types between COVID and control? Do you see any cell type that appears expanded or depleted in COVID? How would you quantify this?
+
+---
+
+# Session info
+
+
+```{r session-info}
+sessionInfo()
+```

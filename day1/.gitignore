@@ -1,0 +1,7 @@
+# Large data files
+*.h5ad
+*.rds
+
+# Temporary / system
+*.log
+.DS_Store

@@ -1,0 +1,93 @@
+Attaching SeuratObject
+Attaching sp
+Registered S3 method overwritten by 'SeuratDisk':
+  method            from  
+  as.sparse.H5Group Seurat
+Warning: Overwriting previous file ../data/covid/results/alldata.h5Seurat
+Creating h5Seurat file for version 3.1.5.9900
+Adding counts for RNA
+Adding data for RNA
+Adding variable features for RNA
+Adding feature-level metadata for RNA
+Adding cell embeddings for pca
+Adding loadings for pca
+No projected loadings for pca
+Adding standard deviations for pca
+No JackStraw data for pca
+Adding cell embeddings for umap
+No loadings for umap
+No projected loadings for umap
+No standard deviations for umap
+No JackStraw data for umap
+Adding cell embeddings for tsne
+No loadings for tsne
+No projected loadings for tsne
+No standard deviations for tsne
+No JackStraw data for tsne
+Adding cell embeddings for UMAP10_on_PCA
+No loadings for UMAP10_on_PCA
+No projected loadings for UMAP10_on_PCA
+No standard deviations for UMAP10_on_PCA
+No JackStraw data for UMAP10_on_PCA
+Adding cell embeddings for UMAP_on_ScaledData
+No loadings for UMAP_on_ScaledData
+No projected loadings for UMAP_on_ScaledData
+No standard deviations for UMAP_on_ScaledData
+No JackStraw data for UMAP_on_ScaledData
+Adding cell embeddings for integrated_cca
+Adding loadings for integrated_cca
+No projected loadings for integrated_cca
+No standard deviations for integrated_cca
+No JackStraw data for integrated_cca
+Adding cell embeddings for umap_cca
+No loadings for umap_cca
+No projected loadings for umap_cca
+No standard deviations for umap_cca
+No JackStraw data for umap_cca
+Adding cell embeddings for tsne_cca
+No loadings for tsne_cca
+No projected loadings for tsne_cca
+No standard deviations for tsne_cca
+No JackStraw data for tsne_cca
+Adding cell embeddings for harmony
+No loadings for harmony
+No projected loadings for harmony
+No standard deviations for harmony
+No JackStraw data for harmony
+Adding cell embeddings for umap_harmony
+No loadings for umap_harmony
+No projected loadings for umap_harmony
+No standard deviations for umap_harmony
+No JackStraw data for umap_harmony
+Adding cell embeddings for integrated.mnn
+Adding loadings for integrated.mnn
+No projected loadings for integrated.mnn
+No standard deviations for integrated.mnn
+No JackStraw data for integrated.mnn
+Adding cell embeddings for umap_fastmnn
+No loadings for umap_fastmnn
+No projected loadings for umap_fastmnn
+No standard deviations for umap_fastmnn
+No JackStraw data for umap_fastmnn
+Validating h5Seurat file
+Adding data from RNA as X
+Transfering meta.features to var
+Adding counts from RNA as raw
+Transfering meta.features to raw/var
+Transfering meta.data to obs
+Adding dimensional reduction information for UMAP10_on_PCA
+Adding dimensional reduction information for UMAP_on_ScaledData
+Adding dimensional reduction information for harmony
+Adding dimensional reduction information for integrated.mnn
+Adding feature loadings for integrated.mnn
+Adding dimensional reduction information for integrated_cca
+Adding feature loadings for integrated_cca
+Adding dimensional reduction information for pca
+Adding feature loadings for pca
+Adding dimensional reduction information for tsne
+Adding dimensional reduction information for tsne_cca
+Adding dimensional reduction information for umap
+Adding dimensional reduction information for umap_cca
+Adding dimensional reduction information for umap_fastmnn
+Adding dimensional reduction information for umap_harmony
+Adding RNA_snn as neighbors
