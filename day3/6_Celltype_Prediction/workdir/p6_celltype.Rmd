@@ -554,9 +554,12 @@ if (!is.null(cm_data)) {
     filter(lengths(genes) >= 5) %>%
     deframe()
 
+  gene_sets <- sapply(gene_sets, function(x) x[!is.na(x)])
+  
   cat("Gene sets tested:", length(gene_sets), "\n")
 
   gsea_results <- lapply(sort(unique(markers$cluster)), function(cl) {
+    print(cl)
     cl_markers <- markers %>%
       filter(cluster == cl) %>%
       arrange(desc(avg_log2FC))
@@ -570,7 +573,7 @@ if (!is.null(cm_data)) {
   })
 
   gsea_top <- bind_rows(gsea_results)
-  print(gsea_top %>% select(cluster, pathway, NES, padj))
+  print(gsea_top %>% dplyr::select(cluster, pathway, NES, padj))
 } else {
   message("Skipping GSEA — CellMarker not reachable.")
 }

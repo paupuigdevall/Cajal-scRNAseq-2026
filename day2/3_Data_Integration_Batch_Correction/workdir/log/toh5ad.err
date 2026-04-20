@@ -3,7 +3,6 @@ Attaching sp
 Registered S3 method overwritten by 'SeuratDisk':
   method            from  
   as.sparse.H5Group Seurat
-Warning: Overwriting previous file ../data/covid/results/alldata.h5Seurat
 Creating h5Seurat file for version 3.1.5.9900
 Adding counts for RNA
 Adding data for RNA
@@ -90,4 +89,3 @@ Adding dimensional reduction information for umap
 Adding dimensional reduction information for umap_cca
 Adding dimensional reduction information for umap_fastmnn
 Adding dimensional reduction information for umap_harmony
-Adding RNA_snn as neighbors

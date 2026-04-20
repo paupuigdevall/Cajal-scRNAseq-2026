@@ -1,0 +1,3 @@
+/shared/projects/tp_2616_fnom_183960/Puigdevall_P/cr_out/cr_output_SRR30648872/outs/possorted_genome_bam.bam	mid_organoids8644018
+/shared/projects/tp_2616_fnom_183960/Puigdevall_P/cr_out/cr_output_SRR30648889/outs/possorted_genome_bam.bam	mid_organoids8644017
+/shared/projects/tp_2616_fnom_183960/Puigdevall_P/cr_out/cr_output_SRR30648890/outs/possorted_genome_bam.bam	mid_organoids8644016
